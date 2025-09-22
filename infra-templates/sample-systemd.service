@@ -1,0 +1,13 @@
+[Unit]
+Description=Sample Node Backend
+After=network.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/app
+EnvironmentFile=/home/ec2-user/app/.env
+ExecStart=/usr/bin/node /home/ec2-user/app/index.js
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
