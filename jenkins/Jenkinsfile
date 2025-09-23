@@ -1,9 +1,9 @@
 pipeline {
   agent any
 
-  environment {
-    // set FRONTEND_HOST either here or in the Jenkins job config / pipeline parameters
-    // FRONTEND_HOST = '1.2.3.4'
+  // provide the target host as a parameter when you run the job
+  parameters {
+    string(name: 'FRONTEND_HOST', defaultValue: '', description: 'IP or hostname of the frontend server (e.g. 1.2.3.4)')
   }
 
   stages {
@@ -16,13 +16,12 @@ pipeline {
     stage('Build Frontend') {
       steps {
         dir('frontend') {
-          // require node & npm installed on the Jenkins agent
+          // ensure node/npm available to the Jenkins agent
           sh 'node --version || { echo "node not found"; exit 1; }'
           sh 'npm --version || { echo "npm not found"; exit 1; }'
 
           sh 'npm ci'
           sh 'npm run build'
-          // copy build to workspace root for deploy stage
           sh 'rm -rf ../frontend_build || true && cp -r build ../frontend_build'
         }
       }
@@ -30,19 +29,19 @@ pipeline {
 
     stage('Deploy Frontend') {
       steps {
-        // expects an SSH credential (username + private key) with id 'ec2-ssh-key'
-        withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
-          // FRONTEND_HOST must be set in Jenkins job as env var or replaced above
-          sh '''
-            if [ -z "${FRONTEND_HOST}" ]; then
-              echo "ERROR: FRONTEND_HOST is not set"; exit 1
-            fi
+        script {
+          if (!params.FRONTEND_HOST?.trim()) {
+            error "FRONTEND_HOST parameter is empty. Provide the target host when starting the job."
+          }
+        }
 
+        withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
+          sh '''
             rsync -avz -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" frontend_build/ ${SSH_USER}@${FRONTEND_HOST}:/tmp/frontend_build/
             ssh -i $SSH_KEY -o StrictHostKeyChecking=no ${SSH_USER}@${FRONTEND_HOST} bash -lc "
               sudo rm -rf /usr/share/nginx/html/* || true
               sudo mv /tmp/frontend_build/* /usr/share/nginx/html/ || true
-              # adjust owner if your nginx user differs (e.g., www-data)
+              # adjust owner if your nginx user is different (nginx or www-data)
               sudo chown -R nginx:nginx /usr/share/nginx/html || true
               sudo nginx -t && sudo systemctl reload nginx || sudo systemctl restart nginx || true
             "
@@ -53,14 +52,14 @@ pipeline {
 
     stage('Smoke Test') {
       steps {
-        echo "Frontend URL: http://${FRONTEND_HOST}"
-        sh "curl -sS --max-time 10 http://${FRONTEND_HOST}/ || true"
+        echo "Frontend URL: http://${params.FRONTEND_HOST}"
+        sh "curl -sS --max-time 10 http://${params.FRONTEND_HOST}/ || true"
       }
     }
   }
 
   post {
-    success { echo "Frontend deployed to ${FRONTEND_HOST}" }
+    success { echo "Frontend deployed to ${params.FRONTEND_HOST}" }
     failure { echo "Frontend deploy failed — check console output" }
   }
 }
