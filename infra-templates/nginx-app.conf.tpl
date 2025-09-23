@@ -10,7 +10,7 @@ server {
     }
 
     location /api/ {
-        proxy_pass http://__BACKEND_IP__:8080/;
+        proxy_pass http://98.89.2.237:8080/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
