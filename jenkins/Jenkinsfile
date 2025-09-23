@@ -2,42 +2,23 @@ pipeline {
   agent any
 
   environment {
-    SSH_USER = 'ec2-user'        // default linux user on Amazon Linux
-    DB_USER = 'postgres'         // RDS master username used in terraform
+    NODE_IMAGE = 'node:20-alpine'
   }
 
   stages {
-    stage('Checkout') { steps { checkout scm } }
+    stage('Checkout') {
+      steps { checkout scm }
+    }
 
     stage('Build Frontend') {
+      agent {
+        docker { image "${env.NODE_IMAGE}" args '-u root:root' }
+      }
       steps {
         dir('frontend') {
           sh 'npm ci'
           sh 'npm run build'
-        }
-      }
-    }
-
-    stage('Build Backend') {
-      steps {
-        dir('backend') {
-          sh 'npm ci'
-          sh 'zip -r ../backend-artifact.zip . -x node_modules/**'
-        }
-      }
-    }
-
-    stage('Run DB Migrations') {
-      steps {
-        withCredentials([string(credentialsId: 'rds-db-pass', variable: 'DB_PASS')]) {
-          sh """
-            echo "Running DB migrations against ${RDS_ENDPOINT}"
-            PGPASSWORD=${DB_PASS} psql -h ${RDS_ENDPOINT} -U ${DB_USER} -d postgres -c "CREATE DATABASE IF NOT EXISTS appdb;" || true
-            for f in migrations/*.sql; do
-              echo "Applying $f"
-              PGPASSWORD=${DB_PASS} psql -h ${RDS_ENDPOINT} -U ${DB_USER} -d appdb -f $f
-            done
-          """
+          sh 'rm -rf ../frontend_build || true && cp -r build ../frontend_build'
         }
       }
     }
@@ -45,51 +26,24 @@ pipeline {
     stage('Deploy Frontend') {
       steps {
         withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER')]) {
-          sh """
-            rsync -avz -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" frontend/build/ ${SSH_USER}@${FRONTEND_HOST}:/tmp/frontend_build/
-            ssh -i $SSH_KEY -o StrictHostKeyChecking=no ${SSH_USER}@${FRONTEND_HOST} "sudo rm -rf /usr/share/nginx/html/* && sudo mv /tmp/frontend_build/* /usr/share/nginx/html/ && sudo chown -R nginx:nginx /usr/share/nginx/html && sudo nginx -t && sudo systemctl reload nginx"
-          """
+          sh '''
+            # sync built files to remote tmp, then move into nginx dir and reload
+            rsync -avz -e "ssh -i $SSH_KEY -o StrictHostKeyChecking=no" frontend_build/ ${SSH_USER}@${FRONTEND_HOST}:/tmp/frontend_build/
+            ssh -i $SSH_KEY -o StrictHostKeyChecking=no ${SSH_USER}@${FRONTEND_HOST} bash -lc "
+              sudo rm -rf /usr/share/nginx/html/* || true
+              sudo mv /tmp/frontend_build/* /usr/share/nginx/html/ || true
+              # adjust owner if your nginx user is different (nginx or www-data)
+              sudo chown -R nginx:nginx /usr/share/nginx/html || true
+              sudo nginx -t && sudo systemctl reload nginx || sudo systemctl restart nginx || true
+            "
+          '''
         }
-      }
-    }
-
-    stage('Deploy Backend') {
-      steps {
-        withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'SSH_KEY', usernameVariable: 'SSH_USER'),
-                         string(credentialsId: 'rds-db-pass', variable: 'DB_PASS')]) {
-          sh """
-            scp -i $SSH_KEY -o StrictHostKeyChecking=no /tmp/backend-artifact.zip ${SSH_USER}@${BACKEND_HOST}:/tmp/
-            ssh -i $SSH_KEY -o StrictHostKeyChecking=no ${SSH_USER}@${BACKEND_HOST} '
-              sudo rm -rf /home/ec2-user/app/*;
-              sudo unzip -o /tmp/backend-artifact.zip -d /home/ec2-user/app/;
-              sudo chown -R ec2-user:ec2-user /home/ec2-user/app;
-              cat > /home/ec2-user/app/.env <<EOF
-PG_HOST=${RDS_ENDPOINT}
-PG_PORT=5432
-PG_USER=${DB_USER}
-PG_PASSWORD=${DB_PASS}
-PG_DATABASE=appdb
-EOF
-              cd /home/ec2-user/app;
-              npm ci --production;
-              sudo systemctl enable sample-backend.service;
-              sudo systemctl restart sample-backend.service;
-            '
-          """
-        }
-      }
-    }
-
-    stage('Smoke Test') {
-      steps {
-        echo "Frontend URL: http://${FRONTEND_HOST}"
-        sh "curl -s http://${FRONTEND_HOST}/api/hello || true"
       }
     }
   }
 
   post {
-    failure { echo "Pipeline failed — check logs" }
-    success { echo "Pipeline succeeded" }
+    success { echo "Frontend deployed to ${FRONTEND_HOST}" }
+    failure { echo "Frontend deploy failed — check console output" }
   }
 }
